@@ -313,7 +313,7 @@ private:
 
 void updateIndoorBikeData()
 {
-  uint8_t data[16];
+  unsigned char data[16];
 
   // Flags (0x64 = Speed + Cadence + Power present)
   data[0] = 0x44;
@@ -325,24 +325,22 @@ void updateIndoorBikeData()
   // data[3] = (speed >> 8) & 0xFF;
 
   // Instantaneous Cadence (0.5 rpm units) - LITTLE ENDIAN
-  int16_t cadence = cadenceInstantaneous;
-  data[2] = cadence & 0xFF;
-  data[3] = (cadence >> 8) & 0xFF;
+  data[2] = cadenceInstantaneous & 0xFF;
+  data[3] = (cadenceInstantaneous >> 8) & 0xFF;
 
   // Instantaneous Power (Watts) - LITTLE ENDIAN
   data[4] = powerInstantaneous & 0xFF;
   data[5] = (powerInstantaneous >> 8) & 0xFF;
 
   // Instantaneous Power (Watts) - LITTLE ENDIAN - ESTA É A POTÊNCIA QUE O MYWHOOSH VÊ
-  int16_t power = resistance;
-  data[6] = power & 0xFF;
+  data[6] = powerInstantaneous & 0xFF;
   data[7] = 0x00;
 
   IndoorBikeData->setValue(data, 8);
   IndoorBikeData->notify();
 
   Serial.printf("📤 IndoorBikeData - Potência: %dW | Cadência: %dRPM | Velocidade: %.1fkm/h\n",
-                power, cadenceInstantaneous, speedInstantaneous / 100.0f);
+                powerInstantaneous, cadenceInstantaneous, speedInstantaneous / 100.0f);
 }
 
 void updateCyclingPowerData()
@@ -361,7 +359,7 @@ void updateCyclingPowerData()
   CyclingPowerMeasurement->setValue(data, 4);
   CyclingPowerMeasurement->notify();
 
-  Serial.printf("⚡ CyclingPower - Potência: %dW\n", power);
+  Serial.printf("⚡ CyclingPower - Potência: %dW\n", power); // TODO: esse valor de power esta indo como cadencia no mywhoosh
 }
 
 void setupServer()
@@ -458,7 +456,7 @@ void loop()
   if (millis() - lastDataUpdate >= 250)
   {
     updateIndoorBikeData();   // Envia potência via Fitness Machine
-    updateCyclingPowerData(); // Envia potência via Cycling Power
+    // updateCyclingPowerData(); // Envia potência via Cycling Power
 
     lastDataUpdate = millis();
   }
