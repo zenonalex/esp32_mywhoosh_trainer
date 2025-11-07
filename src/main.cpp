@@ -25,13 +25,13 @@ uint16_t lastWheelTime = 0;
 unsigned long lastSpeedMillis = 0;
 
 // ============================================================================
-// VARIÁVEIS PARA SERVIDOR BLE (MYWHOOSH)
+// VARIÁVEIS PARA SERVIDOR BLE (MYWHOOSH) - TODAS COMO short
 // ============================================================================
 
-int16_t powerInstantaneous = 200; // Potência inicial de 200W
-int16_t cadenceInstantaneous = 80;
-int16_t speedInstantaneous = 2000; // 20.00 km/h
-int16_t resistance = 20;           // Resistência inicial 20% esse valor esta indo como potencia no indoordata
+short powerInstantaneous = 200; // Potência inicial de 200W
+short cadenceInstantaneous = 80;
+short speedInstantaneous = 2000; // 20.00 km/h
+short resistance = 20;           // Resistência inicial 20%
 bool trainingStarted = false;
 
 static NimBLEServer *pServer;
@@ -67,7 +67,7 @@ void processCadenceData(uint8_t *data, size_t length)
 
         if (rpm >= 0 && rpm <= 200)
         {
-          cadenceInstantaneous = (int16_t)rpm;
+          cadenceInstantaneous = (short)rpm;
           Serial.printf("🚴‍♂️ Cadência: %.1f RPM\n", rpm);
         }
       }
@@ -108,10 +108,10 @@ void processSpeedData(uint8_t *data, size_t length)
 
         if (speedKmh >= 0 && speedKmh <= 100)
         {
-          speedInstantaneous = (int16_t)(speedKmh * 100); // Em centésimos de km/h
+          speedInstantaneous = (short)(speedKmh * 100); // Em centésimos de km/h
 
           // Cálculo de potência baseado na velocidade e resistência
-          powerInstantaneous = (int16_t)(speedKmh * resistance * 1.5f);
+          powerInstantaneous = (short)(speedKmh * resistance * 1.5f);
           if (powerInstantaneous < 0)
             powerInstantaneous = 0;
           if (powerInstantaneous > 1000)
@@ -233,7 +233,7 @@ void startSensorScan()
 }
 
 // ============================================================================
-// SERVIDOR BLE - ENVIO DE POTÊNCIA CORRETO
+// SERVIDOR BLE - COM short E FORMATO QUE VOCÊ PEDIU
 // ============================================================================
 
 class ServerCallbacks : public NimBLEServerCallbacks
@@ -314,52 +314,45 @@ private:
 void updateIndoorBikeData()
 {
   unsigned char data[16];
-
-  // Flags (0x64 = Speed + Cadence + Power present)
   data[0] = 0x44;
   data[1] = 0x00;
 
-  // Instantaneous Speed (0.01 km/h units) - LITTLE ENDIAN
-  // int16_t speed = speedInstantaneous;
-  // data[2] = speed & 0xFF;
-  // data[3] = (speed >> 8) & 0xFF;
+  // Potência primeiro
+  data[2] = powerInstantaneous & 0xFF;
+  data[3] = (powerInstantaneous >> 8) & 0xFF;
 
-  // Instantaneous Cadence (0.5 rpm units) - LITTLE ENDIAN
-  data[2] = cadenceInstantaneous & 0xFF;
-  data[3] = (cadenceInstantaneous >> 8) & 0xFF;
+  // ⚡ CADÊNCIA: multiplicar por 2 para unidades de 0.5 RPM
+  short cadenceValue = cadenceInstantaneous * 2;
+  data[4] = cadenceValue & 0xFF;
+  data[5] = (cadenceValue >> 8) & 0xFF;
 
-  // Instantaneous Power (Watts) - LITTLE ENDIAN
-  data[4] = powerInstantaneous & 0xFF;
-  data[5] = (powerInstantaneous >> 8) & 0xFF;
-
-  // Instantaneous Power (Watts) - LITTLE ENDIAN - ESTA É A POTÊNCIA QUE O MYWHOOSH VÊ
   data[6] = powerInstantaneous & 0xFF;
   data[7] = 0x00;
 
   IndoorBikeData->setValue(data, 8);
   IndoorBikeData->notify();
 
-  Serial.printf("📤 IndoorBikeData - Potência: %dW | Cadência: %dRPM | Velocidade: %.1fkm/h\n",
-                powerInstantaneous, cadenceInstantaneous, speedInstantaneous / 100.0f);
+  Serial.printf("📤 INDOOR BIKE - Potência: %dW | Cadência: %dRPM\n",
+                powerInstantaneous, cadenceValue);
 }
 
 void updateCyclingPowerData()
 {
-  uint8_t data[8];
+  unsigned char data[8]; // ⚡ MANTER unsigned char
 
   // Flags (0x10 = Instantaneous Power present)
   data[0] = 0x10;
   data[1] = 0x00;
 
   // Instantaneous Power (Watts) - LITTLE ENDIAN
-  int16_t power = powerInstantaneous;
-  data[2] = power & 0xFF;
-  data[3] = (power >> 8) & 0xFF;
+  short powerValue = powerInstantaneous;
+  data[2] = powerValue & 0xFF;
+  data[3] = (powerValue >> 8) & 0xFF;
 
   CyclingPowerMeasurement->setValue(data, 4);
   CyclingPowerMeasurement->notify();
 
-  Serial.printf("⚡ CyclingPower - Potência: %dW\n", power); // TODO: esse valor de power esta indo como cadencia no mywhoosh
+  Serial.printf("⚡ CyclingPower - Potência: %dW\n", powerInstantaneous);
 }
 
 void setupServer()
@@ -421,7 +414,7 @@ void setupServer()
 void setup()
 {
   Serial.begin(115200);
-  Serial.println("\n🚴‍♂️ ESP32 MyWhoosh Trainer - Potência via powerInstantaneous");
+  Serial.println("\n🚴‍♂️ ESP32 MyWhoosh Trainer - Com short e formato original");
 
   setupServer();
   delay(2000);
@@ -456,7 +449,7 @@ void loop()
   if (millis() - lastDataUpdate >= 250)
   {
     updateIndoorBikeData();   // Envia potência via Fitness Machine
-    // updateCyclingPowerData(); // Envia potência via Cycling Power
+    updateCyclingPowerData(); // Envia potência via Cycling Power
 
     lastDataUpdate = millis();
   }
