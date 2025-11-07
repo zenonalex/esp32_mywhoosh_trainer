@@ -31,7 +31,7 @@ unsigned long lastSpeedMillis = 0;
 short powerInstantaneous = 200; // Potência inicial de 200W
 short cadenceInstantaneous = 80;
 short speedInstantaneous = 2000; // 20.00 km/h
-short resistance = 20;           // Resistência inicial 20%
+short resistance = 8;           // Resistência inicial 8%
 bool trainingStarted = false;
 
 static NimBLEServer *pServer;
@@ -111,7 +111,7 @@ void processSpeedData(uint8_t *data, size_t length)
           speedInstantaneous = (short)(speedKmh * 100); // Em centésimos de km/h
 
           // Cálculo de potência baseado na velocidade e resistência
-          powerInstantaneous = (short)(speedKmh * resistance * 1.5f);
+          powerInstantaneous = (short)(speedKmh * resistance * 0.8f);
           if (powerInstantaneous < 0)
             powerInstantaneous = 0;
           if (powerInstantaneous > 1000)
@@ -317,23 +317,24 @@ void updateIndoorBikeData()
   data[0] = 0x44;
   data[1] = 0x00;
 
-  // Potência primeiro
-  data[2] = powerInstantaneous & 0xFF;
-  data[3] = (powerInstantaneous >> 8) & 0xFF;
-
-  // ⚡ CADÊNCIA: multiplicar por 2 para unidades de 0.5 RPM
+  // ⚡ TESTE: DATA[2-3] como RESISTÊNCIA
+  data[2] = resistance & 0xFF;           // Resistência low
+  data[3] = (resistance >> 8) & 0xFF;    // Resistência high
+  
+  // DATA[4-5] como CADÊNCIA
   short cadenceValue = cadenceInstantaneous * 2;
-  data[4] = cadenceValue & 0xFF;
-  data[5] = (cadenceValue >> 8) & 0xFF;
+  data[4] = cadenceValue & 0xFF;         // Cadência low
+  data[5] = (cadenceValue >> 8) & 0xFF;  // Cadência high
 
-  data[6] = powerInstantaneous & 0xFF;
-  data[7] = 0x00;
+  // ⚡ DATA[6-7] como POTÊNCIA
+  data[6] = powerInstantaneous & 0xFF;    // Potência low
+  data[7] = (powerInstantaneous >> 8) & 0xFF; // Potência high
 
   IndoorBikeData->setValue(data, 8);
   IndoorBikeData->notify();
 
-  Serial.printf("📤 INDOOR BIKE - Potência: %dW | Cadência: %dRPM\n",
-                powerInstantaneous, cadenceValue);
+  Serial.printf("🔍 TESTE INVERTIDO - Resistência: %d%% | Cadência: %dRPM | Potência: %dW\n",
+                resistance, cadenceInstantaneous, powerInstantaneous);
 }
 
 void updateCyclingPowerData()
