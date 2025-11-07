@@ -1,33 +1,51 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 
+// ============================================================================
+// CONFIGURAÇÕES DOS SENSORES REAIS
+// ============================================================================
+
+// 🔧 Identificadores dos sensores BLE
+const std::string CADENCE_SENSOR_NAME = "53470-17";
+const std::string SPEED_SENSOR_NAME = "29562-49";
+
+// ⚙️ UUIDs do serviço e característica CSC (Cycling Speed and Cadence)
+static NimBLEUUID CSC_SERVICE_UUID("00001816-0000-1000-8000-00805f9b34fb");
+static NimBLEUUID CSC_CHARACTERISTIC_UUID("00002a5b-0000-1000-8000-00805f9b34fb");
+
+// ⚙️ Configuração da roda (em metros)
+const float WHEEL_CIRCUMFERENCE = 2.096f;
+
+// 🔢 Referências de dispositivos e clientes
+NimBLEAdvertisedDevice *cadenceDevice = nullptr;
+NimBLEAdvertisedDevice *speedDevice = nullptr;
+NimBLEClient *cadenceClient = nullptr;
+NimBLEClient *speedClient = nullptr;
+
+// 📊 Variáveis para cálculo de cadência
+uint16_t lastCadenceRevs = 0;
+uint16_t lastCadenceTime = 0;
+unsigned long lastCadenceMillis = 0;
+
+// 📊 Variáveis para cálculo de velocidade
+uint32_t lastWheelRevs = 0;
+uint16_t lastWheelTime = 0;
+unsigned long lastSpeedMillis = 0;
+
+// ============================================================================
+// VARIÁVEIS PARA SERVIDOR BLE (MYWHOOSH)
+// ============================================================================
+
 short powerInstantaneous = 0;
 short cadenceInstantaneous = 0;
 short speedInstantaneous = 0;
-float powerScale = 1.28;
-short resistance = 200; // Resistência inicial em %
-bool notify = false;
+short resistance = 200;
 bool trainingStarted = false;
 
-// UUIDs para Client (conectar ao sensor)
-static BLEUUID serviceUUID("1826"); // Fitness Machine
-static BLEUUID charUUID("2ad2"); // Indoor Bike Data
-
-static BLEUUID HRserviceUUID("180D"); // HR Service
-static BLEUUID HRcharUUID("2a37"); // HR Measurement
-
-static boolean doConnect = false;
-static boolean connected = false;
-static boolean doScan = false;
-static BLERemoteCharacteristic *pRemoteCharacteristic;
-static BLEAdvertisedDevice *myDevice;
-
-/* 
- * Server Stuff - Nosso dispositivo como servidor BLE
- */
+// Server variables
 static NimBLEServer *pServer;
 
-// Declarar as características como variáveis globais
+// Características do servidor BLE
 NimBLECharacteristic *CyclingPowerFeature = NULL;
 NimBLECharacteristic *CyclingPowerMeasurement = NULL;
 NimBLECharacteristic *CyclingPowerSensorLocation = NULL;
@@ -36,149 +54,229 @@ NimBLECharacteristic *IndoorBikeData = NULL;
 NimBLECharacteristic *FitnessMachineControlPoint = NULL;
 NimBLECharacteristic *FitnessMachineStatus = NULL;
 
-/** Callbacks do servidor */
-class ServerCallbacks : public NimBLEServerCallbacks
+// ============================================================================
+// PROCESSAMENTO DOS SENSORES REAIS
+// ============================================================================
+
+void processCadenceData(uint8_t *data, size_t length)
 {
-  void onConnect(NimBLEServer *pServer)
-  {
-    Serial.println("Client connected");
-    Serial.println("Multi-connect support: start advertising");
-    NimBLEDevice::startAdvertising();
-  };
+  if (length < 5) return;
 
-  void onConnect(NimBLEServer *pServer, ble_gap_conn_desc *desc)
-  {
-    Serial.print("Client address: ");
-    Serial.println(NimBLEAddress(desc->peer_ota_addr).toString().c_str());
-    pServer->updateConnParams(desc->conn_handle, 24, 48, 0, 60);
-  };
+  uint8_t flags = data[0];
+  if (flags & 0x02) { // contém dados de pedivela
+    uint16_t revs = data[1] | (data[2] << 8);
+    uint16_t time = data[3] | (data[4] << 8);
 
-  void onDisconnect(NimBLEServer *pServer)
-  {
-    Serial.println("Client disconnected - start advertising");
-    NimBLEDevice::startAdvertising();
-    trainingStarted = false; // Reset training state on disconnect
-  };
-
-  void onMTUChange(uint16_t MTU, ble_gap_conn_desc *desc)
-  {
-    Serial.printf("MTU updated: %u for connection ID: %u\n", MTU, desc->conn_handle);
-  };
-};
-
-/** Callbacks para características gerais */
-class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
-{
-  void onRead(NimBLECharacteristic *pCharacteristic)
-  {
-    Serial.print(pCharacteristic->getUUID().toString().c_str());
-    Serial.print(": onRead(), value: ");
-    Serial.println(pCharacteristic->getValue().c_str());
-  };
-
-  void onWrite(NimBLECharacteristic *pCharacteristic)
-  {
-    Serial.print(pCharacteristic->getUUID().toString().c_str());
-    Serial.print(": onWrite(), value: ");
-    Serial.println(pCharacteristic->getValue().c_str());
-  };
-
-  void onNotify(NimBLECharacteristic *pCharacteristic)
-  {
-    Serial.println("Sending notification to clients");
-  };
-
-  void onStatus(NimBLECharacteristic *pCharacteristic, Status status, int code)
-  {
-    String str = ("Notification/Indication status code: ");
-    str += status;
-    str += ", return code: ";
-    str += code;
-    str += ", ";
-    str += NimBLEUtils::returnCodeToString(code);
-    Serial.println(str);
-  };
-
-  void onSubscribe(NimBLECharacteristic *pCharacteristic, ble_gap_conn_desc *desc, uint16_t subValue)
-  {
-    String str = "Client ID: ";
-    str += desc->conn_handle;
-    str += " Address: ";
-    str += std::string(NimBLEAddress(desc->peer_ota_addr)).c_str();
-    if (subValue == 0)
-    {
-      str += " Unsubscribed to ";
+    if (lastCadenceTime != 0 && time != lastCadenceTime) {
+      uint16_t deltaRevs = revs - lastCadenceRevs;
+      uint16_t deltaTime = time - lastCadenceTime;
+      
+      if (deltaTime > 0) {
+        float seconds = deltaTime / 1024.0f;
+        float rpm = (deltaRevs / seconds) * 60.0f;
+        
+        if (rpm >= 0 && rpm <= 200) {
+          cadenceInstantaneous = (short)rpm;
+          Serial.printf("🚴‍♂️ Cadência: %.1f RPM\n", rpm);
+        }
+      }
     }
-    else if (subValue == 1)
-    {
-      str += " Subscribed to notifications for ";
-    }
-    else if (subValue == 2)
-    {
-      str += " Subscribed to indications for ";
-    }
-    else if (subValue == 3)
-    {
-      str += " Subscribed to notifications and indications for ";
-    }
-    str += std::string(pCharacteristic->getUUID()).c_str();
-    Serial.println(str);
-  };
-};
 
-void updateFitnessMachineStatus() {
-    unsigned char status[3];
-    status[0] = 0x0A; // Resistance Level Status type
-    status[1] = resistance & 0xFF; // Current resistance
-    status[2] = 0x00;
-    
-    if (FitnessMachineStatus) {
-        FitnessMachineStatus->setValue(status, 3);
-        FitnessMachineStatus->notify();
-    }
+    lastCadenceRevs = revs;
+    lastCadenceTime = time;
+    lastCadenceMillis = millis();
+  }
 }
 
-/** Callbacks para o Control Point (ESSENCIAL para controle) */
+void processSpeedData(uint8_t *data, size_t length)
+{
+  if (length < 7) return;
+
+  uint8_t flags = data[0];
+  if (flags & 0x01) { // contém dados de roda
+    uint32_t revs = data[1] | (data[2] << 8) | (data[3] << 16) | (data[4] << 24);
+    uint16_t time = data[5] | (data[6] << 8);
+
+    if (lastWheelTime != 0 && time != lastWheelTime) {
+      uint32_t deltaRevs = revs - lastWheelRevs;
+      uint16_t deltaTime = time - lastWheelTime;
+      
+      if (deltaTime > 0) {
+        float seconds = deltaTime / 1024.0f;
+        float distanceMeters = deltaRevs * WHEEL_CIRCUMFERENCE;
+        float speedKmh = (distanceMeters / seconds) * 3.6f;
+        
+        if (speedKmh >= 0 && speedKmh <= 100) {
+          speedInstantaneous = (short)(speedKmh * 10);
+          powerInstantaneous = (short)(speedKmh * resistance * 0.1f);
+          Serial.printf("⚙️ Velocidade: %.2f km/h | Potência: %d W\n", speedKmh, powerInstantaneous);
+        }
+      }
+    }
+
+    lastWheelRevs = revs;
+    lastWheelTime = time;
+    lastSpeedMillis = millis();
+  }
+}
+
+// ============================================================================
+// CALLBACKS E CONEXÃO DOS SENSORES
+// ============================================================================
+
+void handleSensorNotification(NimBLERemoteCharacteristic *characteristic, uint8_t *data, size_t length, bool isNotify)
+{
+  NimBLEClient *client = characteristic->getRemoteService()->getClient();
+
+  if (client == cadenceClient) {
+    processCadenceData(data, length);
+  } else if (client == speedClient) {
+    processSpeedData(data, length);
+  }
+}
+
+class SensorScanCallbacks : public NimBLEAdvertisedDeviceCallbacks
+{
+  void onResult(NimBLEAdvertisedDevice *advertisedDevice) override
+  {
+    std::string name = advertisedDevice->getName();
+    if (!cadenceDevice && name.find(CADENCE_SENSOR_NAME) != std::string::npos) {
+      Serial.printf("🚴‍♂️ Sensor de cadência encontrado: %s\n", advertisedDevice->getAddress().toString().c_str());
+      cadenceDevice = new NimBLEAdvertisedDevice(*advertisedDevice);
+    } else if (!speedDevice && name.find(SPEED_SENSOR_NAME) != std::string::npos) {
+      Serial.printf("⚙️ Sensor de velocidade encontrado: %s\n", advertisedDevice->getAddress().toString().c_str());
+      speedDevice = new NimBLEAdvertisedDevice(*advertisedDevice);
+    }
+
+    if (cadenceDevice && speedDevice) {
+      NimBLEDevice::getScan()->stop();
+      Serial.println("✅ Ambos sensores encontrados. Parando scan.");
+    }
+  }
+};
+
+bool connectToSensor(NimBLEAdvertisedDevice *device, const char *label)
+{
+  Serial.printf("🔗 Tentando conectar ao sensor %s (%s)...\n", label, device->getAddress().toString().c_str());
+
+  NimBLEClient *client = NimBLEDevice::createClient();
+  
+  // Configurações otimizadas para conexão
+  client->setConnectTimeout(15); // Aumentar timeout
+  client->setConnectionParams(12, 12, 0, 600); // Parâmetros mais conservadores
+  
+  if (!client->connect(device, false)) { // auto=false para controle manual
+    Serial.printf("⚠️ Falha ao conectar ao sensor %s.\n", label);
+    NimBLEDevice::deleteClient(client);
+    return false;
+  }
+
+  Serial.printf("✅ Conectado ao sensor %s!\n", label);
+
+  // Pequena pausa após conexão
+  delay(100);
+
+  NimBLERemoteService *service = client->getService(CSC_SERVICE_UUID);
+  if (!service) {
+    Serial.printf("❌ Serviço CSC não encontrado no sensor %s.\n", label);
+    client->disconnect();
+    NimBLEDevice::deleteClient(client);
+    return false;
+  }
+
+  // Pequena pausa antes de buscar característica
+  delay(50);
+
+  NimBLERemoteCharacteristic *characteristic = service->getCharacteristic(CSC_CHARACTERISTIC_UUID);
+  if (!characteristic) {
+    Serial.printf("❌ Característica CSC não encontrada no sensor %s.\n", label);
+    client->disconnect();
+    NimBLEDevice::deleteClient(client);
+    return false;
+  }
+
+  if (characteristic->canNotify()) {
+    if (!characteristic->subscribe(true, handleSensorNotification, true)) {
+      Serial.printf("❌ Falha ao subscrever notificações do sensor %s.\n", label);
+      client->disconnect();
+      NimBLEDevice::deleteClient(client);
+      return false;
+    }
+    Serial.printf("📡 Subscrito para notificações CSC (%s)\n", label);
+  }
+
+  if (std::string(label) == "cadência") {
+    cadenceClient = client;
+    lastCadenceRevs = 0;
+    lastCadenceTime = 0;
+  } else {
+    speedClient = client;
+    lastWheelRevs = 0;
+    lastWheelTime = 0;
+  }
+
+  return true;
+}
+
+void startSensorScan()
+{
+  Serial.println("🔍 Iniciando scan BLE para sensores...");
+  NimBLEScan *scan = NimBLEDevice::getScan();
+  scan->clearResults(); // Limpar resultados anteriores
+  scan->setAdvertisedDeviceCallbacks(new SensorScanCallbacks(), false);
+  scan->setActiveScan(true);
+  scan->setInterval(1349);
+  scan->setWindow(449);
+  scan->setMaxResults(0);
+  scan->start(15, false); // Scan mais longo
+}
+
+// ============================================================================
+// SERVIDOR BLE (MYWHOOSH)
+// ============================================================================
+
+class ServerCallbacks : public NimBLEServerCallbacks
+{
+  void onConnect(NimBLEServer *pServer) {
+    Serial.println("Client connected to MyWhoosh server");
+    NimBLEDevice::startAdvertising();
+  };
+
+  void onDisconnect(NimBLEServer *pServer) {
+    Serial.println("MyWhoosh client disconnected - start advertising");
+    NimBLEDevice::startAdvertising();
+    trainingStarted = false;
+  };
+};
+
 class ControlPointCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* pCharacteristic) {
         std::string value = pCharacteristic->getValue();
-        Serial.printf("Callback Control Point - Written value length: %d\n", value.length());
-        
         if (value.length() > 0) {
             uint8_t opCode = value[0];
-            Serial.printf("Control Point Command: 0x%02X\n", opCode);
-            
             switch (opCode) {
                 case 0x00: // Request Control
-                    Serial.println("Request Control received");
-                    sendControlResponse(0x00, 0x01); // opCode, result success
+                    sendControlResponse(0x00, 0x01);
                     break;
-                    
                 case 0x04: // Set Target Resistance Level
                     if (value.length() >= 2) {
                         resistance = value[1];
                         Serial.printf("Set resistance to: %d%%\n", resistance);
-                        sendControlResponse(0x04, 0x01); // success
-                        updateFitnessMachineStatus();
+                        sendControlResponse(0x04, 0x01);
                     }
                     break;
-                    
                 case 0x05: // Start training
                     if (value.length() >= 2) {
                         trainingStarted = (value[1] == 0x01);
                         Serial.printf("Training %s\n", trainingStarted ? "STARTED" : "STOPPED");
-                        sendControlResponse(0x05, 0x01); // success
+                        sendControlResponse(0x05, 0x01);
                     }
                     break;
-                    
                 case 0x07: // Set Indoor Bike Simulation Parameters
-                    Serial.println("Simulation Parameters received (ignored)");
-                    sendControlResponse(0x07, 0x01); // success
+                    sendControlResponse(0x07, 0x01);
                     break;
-                    
                 default:
-                    Serial.printf("Unhandled opcode: 0x%02X\n", opCode);
-                    sendControlResponse(opCode, 0x80); // opcode not supported
+                    sendControlResponse(opCode, 0x80);
                     break;
             }
         }
@@ -194,138 +292,21 @@ private:
     }
 };
 
-/** Callbacks para descritores */
-class DescriptorCallbacks : public NimBLEDescriptorCallbacks
-{
-  void onWrite(NimBLEDescriptor *pDescriptor)
-  {
-    Serial.print("Descriptor written value:");
-    Serial.println(pDescriptor->getStringValue().c_str());
-  };
-
-  void onRead(NimBLEDescriptor *pDescriptor)
-  {
-    Serial.print(pDescriptor->getUUID().toString().c_str());
-    Serial.println(" Descriptor read");
-  };
-};
-
-/* 
- * Client Stuff - Conectar ao sensor real
- */
-static void notifyCallback(
-    BLERemoteCharacteristic *pBLERemoteCharacteristic,
-    uint8_t *pData,
-    size_t length,
-    bool isNotify)
-{
-  powerInstantaneous = pData[8] | pData[9] << 8;
-  cadenceInstantaneous = 60; // Simulado - substitua pelo valor real se disponível
-  Serial.printf("Power = %d | Cadence = %d | Resistance = %d\n", powerInstantaneous, cadenceInstantaneous, resistance);
-}
-
-class MyClientCallback : public BLEClientCallbacks
-{
-  void onConnect(BLEClient *pclient)
-  {
-  }
-
-  void onDisconnect(BLEClient *pclient)
-  {
-    connected = false;
-    Serial.println("onDisconnect");
-  }
-};
-
-bool connectToServer()
-{
-  Serial.print("Forming a connection to ");
-  Serial.println(myDevice->getAddress().toString().c_str());
-
-  BLEClient *pClient = BLEDevice::createClient();
-  Serial.println(" - Created client");
-
-  pClient->setClientCallbacks(new MyClientCallback());
-
-  pClient->connect(myDevice);
-  Serial.println(" - Connected to server");
-
-  BLERemoteService *pRemoteService = pClient->getService(serviceUUID);
-  if (pRemoteService == nullptr)
-  {
-    Serial.print("Failed to find our service UUID: ");
-    Serial.println(serviceUUID.toString().c_str());
-    pClient->disconnect();
-    return false;
-  }
-  Serial.println(" - Found our service");
-
-  pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
-  if (pRemoteCharacteristic == nullptr)
-  {
-    Serial.print("Failed to find our characteristic UUID: ");
-    Serial.println(charUUID.toString().c_str());
-    pClient->disconnect();
-    return false;
-  }
-  Serial.println(" - Found our characteristic");
-
-  if (pRemoteCharacteristic->canRead())
-  {
-    std::string value = pRemoteCharacteristic->readValue();
-    Serial.print("The characteristic value was: ");
-    Serial.println(value.c_str());
-  }
-
-  if (pRemoteCharacteristic->canNotify())
-    pRemoteCharacteristic->subscribe(true, notifyCallback);
-
-  connected = true;
-  return true;
-}
-
-class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks
-{
-  void onResult(BLEAdvertisedDevice *advertisedDevice)
-  {
-    Serial.print("BLE Advertised Device found: ");
-    Serial.println(advertisedDevice->toString().c_str());
-
-    if (advertisedDevice->haveServiceUUID() && advertisedDevice->isAdvertisingService(serviceUUID))
-    {
-      BLEDevice::getScan()->stop();
-      myDevice = advertisedDevice;
-      doConnect = true;
-      doScan = true;
-    }
-  }
-};
-
-unsigned char bleBuffer[8];
-unsigned short revolutions = 0;
-unsigned short timestamp = 0;
-long lastNotify = 0;
-long lastRevolution = 0;
-
-// Funções para Fitness Machine Service
 void updateFitnessData() {
-    unsigned char bikeData[10];
-    
-    // Flags (0x44 = Instantaneous Cadence + Instantaneous Power present)
-    bikeData[0] = 0x44;
+    unsigned char bikeData[16];
+    bikeData[0] = 0x64; // Flags
     bikeData[1] = 0x00;
     
-    // Instantaneous Cadence (RPM) - 2 bytes
-    bikeData[2] = cadenceInstantaneous & 0xFF;
-    bikeData[3] = (cadenceInstantaneous >> 8) & 0xFF;
+    uint16_t speedValue = speedInstantaneous;
+    bikeData[2] = speedValue & 0xFF;
+    bikeData[3] = (speedValue >> 8) & 0xFF;
     
-    // Instantaneous Power (Watts) - 2 bytes
-    bikeData[4] = powerInstantaneous & 0xFF;
-    bikeData[5] = (powerInstantaneous >> 8) & 0xFF;
+    uint16_t cadenceValue = cadenceInstantaneous * 2;
+    bikeData[4] = cadenceValue & 0xFF;
+    bikeData[5] = (cadenceValue >> 8) & 0xFF;
     
-    // Resistance Level (%) - 2 bytes
-    bikeData[6] = resistance & 0xFF;
-    bikeData[7] = 0x00;
+    bikeData[6] = powerInstantaneous & 0xFF;
+    bikeData[7] = (powerInstantaneous >> 8) & 0xFF;
     
     if (IndoorBikeData) {
         IndoorBikeData->setValue(bikeData, 8);
@@ -333,172 +314,150 @@ void updateFitnessData() {
     }
 }
 
-void setup()
-{
-  Serial.begin(115200);
-  Serial.println("Starting NimBLE Server - Controllable Fitness Machine");
+void updateCyclingPowerData() {
+    unsigned char powerData[8];
+    powerData[0] = 0x20; // Flags
+    powerData[1] = 0x00;
+    powerData[2] = powerInstantaneous & 0xFF;
+    powerData[3] = (powerInstantaneous >> 8) & 0xFF;
+    
+    static uint16_t cumulativeRevs = 0;
+    cumulativeRevs += cadenceInstantaneous / 60;
+    powerData[4] = cumulativeRevs & 0xFF;
+    powerData[5] = (cumulativeRevs >> 8) & 0xFF;
+    
+    static uint16_t lastCrankTime = 0;
+    lastCrankTime = (uint16_t)((millis() * 1024 / 1000) % 65536);
+    powerData[6] = lastCrankTime & 0xFF;
+    powerData[7] = (lastCrankTime >> 8) & 0xFF;
+    
+    if (CyclingPowerMeasurement) {
+        CyclingPowerMeasurement->setValue(powerData, 8);
+        CyclingPowerMeasurement->notify();
+    }
+}
 
-  /** Inicializa dispositivo BLE */
+void setupServer() {
+  Serial.println("Starting NimBLE Server - Controllable Fitness Machine");
   NimBLEDevice::init("QZESP-CONTROLLABLE");
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
 
   pServer = NimBLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
 
-  /** ====================================================
-   * FITNESS MACHINE SERVICE (1826) - PARA CONTROLE
-   * ==================================================== */
+  // Fitness Machine Service
   NimBLEService *pFitnessMachineService = pServer->createService("1826");
+  FitnessMachineFeature = pFitnessMachineService->createCharacteristic("2ACC", NIMBLE_PROPERTY::READ);
+  IndoorBikeData = pFitnessMachineService->createCharacteristic("2AD2", NIMBLE_PROPERTY::NOTIFY);
+  FitnessMachineControlPoint = pFitnessMachineService->createCharacteristic("2AD9", NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::INDICATE);
+  FitnessMachineStatus = pFitnessMachineService->createCharacteristic("2ADA", NIMBLE_PROPERTY::NOTIFY);
 
-  // Fitness Machine Feature (2ACC)
-  FitnessMachineFeature = pFitnessMachineService->createCharacteristic(
-      "2ACC",
-      NIMBLE_PROPERTY::READ
-  );
-
-  // Indoor Bike Data (2AD2)
-  IndoorBikeData = pFitnessMachineService->createCharacteristic(
-      "2AD2", 
-      NIMBLE_PROPERTY::NOTIFY
-  );
-
-  // Fitness Machine Control Point (2AD9) - ESSENCIAL PARA CONTROLE
-  FitnessMachineControlPoint = pFitnessMachineService->createCharacteristic(
-      "2AD9",
-      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::INDICATE
-  );
-
-  // Fitness Machine Status (2ADA)
-  FitnessMachineStatus = pFitnessMachineService->createCharacteristic(
-      "2ADA",
-      NIMBLE_PROPERTY::NOTIFY
-  );
-
-  // Configurar valores iniciais
-  // Fitness Machine Features: 0x000000E0 = Indoor Bike + Power Measurement + Resistance Level
   unsigned char fitnessFeatures[4] = {0xE0, 0x00, 0x00, 0x00};
   FitnessMachineFeature->setValue(fitnessFeatures, 4);
-
-  // Setar callbacks para o Control Point
   FitnessMachineControlPoint->setCallbacks(new ControlPointCallbacks());
-
-  // Iniciar serviço
   pFitnessMachineService->start();
 
-  /** ====================================================
-   * CYCLING POWER SERVICE (1818) - PARA COMPATIBILIDADE
-   * ==================================================== */
+  // Cycling Power Service
   NimBLEService *pCyclingPowerService = pServer->createService("1818");
-  
-  CyclingPowerFeature = pCyclingPowerService->createCharacteristic(
-      "2A65",
-      NIMBLE_PROPERTY::READ
-  );
-  
-  CyclingPowerMeasurement = pCyclingPowerService->createCharacteristic(
-      "2A63",
-      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
-  );
-  
-  CyclingPowerSensorLocation = pCyclingPowerService->createCharacteristic(
-      "2A5D",
-      NIMBLE_PROPERTY::READ
-  );
+  CyclingPowerFeature = pCyclingPowerService->createCharacteristic("2A65", NIMBLE_PROPERTY::READ);
+  CyclingPowerMeasurement = pCyclingPowerService->createCharacteristic("2A63", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  CyclingPowerSensorLocation = pCyclingPowerService->createCharacteristic("2A5D", NIMBLE_PROPERTY::READ);
 
-  // Cycling Power Features: 0x00000008 = Crank Revolution Data Supported
   unsigned char powerFeatures[4] = {0x08, 0x00, 0x00, 0x00};
   CyclingPowerFeature->setValue(powerFeatures, 4);
-
-  // Sensor Location: 0x0D = Top of shoe
   unsigned char sensorLocation[1] = {0x0D};
   CyclingPowerSensorLocation->setValue(sensorLocation, 1);
-
   pCyclingPowerService->start();
 
-  /** ====================================================
-   * CONFIGURAR ADVERTISING
-   * ==================================================== */
+  // Advertising
   NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID("1826"); // Fitness Machine Service (PRINCIPAL)
-  pAdvertising->addServiceUUID("1818"); // Cycling Power Service (compatibilidade)
+  pAdvertising->addServiceUUID("1826");
+  pAdvertising->addServiceUUID("1818");
   pAdvertising->setScanResponse(true);
   pAdvertising->start();
 
-  Serial.println("Advertising Started - Device is now CONTROLLABLE");
+  Serial.println("✅ Servidor BLE iniciado - Pronto para MyWhoosh");
+}
 
-  /** ====================================================
-   * INICIALIZAR CLIENTE BLE (opcional - para conectar a sensor)
-   * ==================================================== */
-  Serial.println("Starting BLE Client...");
-  BLEDevice::init("");
+// ============================================================================
+// SETUP E LOOP PRINCIPAIS
+// ============================================================================
 
-  BLEScan *pBLEScan = BLEDevice::getScan();
-  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
-  pBLEScan->setInterval(1349);
-  pBLEScan->setWindow(449);
-  pBLEScan->setActiveScan(true);
-  pBLEScan->start(5, false);
+void setup()
+{
+  Serial.begin(115200);
+  Serial.println("🚴‍♂️ Iniciando ESP32 Dual BLE: Sensores + MyWhoosh");
+  
+  setupServer();
+  
+  // Pequena pausa antes de iniciar o scan
+  delay(1000);
+  startSensorScan();
 }
 
 void loop()
 {
-  // Gerenciar conexão cliente (se necessário)
-  if (doConnect == true)
-  {
-    if (connectToServer())
-    {
-      Serial.println("We are now connected to the BLE Server.");
+  static unsigned long lastSpeedConnectAttempt = 0;
+  static int speedConnectAttempts = 0;
+
+  // Gerenciar conexões com sensores
+  if (cadenceDevice && !cadenceClient) {
+    connectToSensor(cadenceDevice, "cadência");
+  }
+  
+  if (speedDevice && !speedClient) {
+    // Tentar conectar ao sensor de velocidade com intervalo crescente
+    if (millis() - lastSpeedConnectAttempt > (2000 + (speedConnectAttempts * 1000))) {
+      if (connectToSensor(speedDevice, "velocidade")) {
+        speedConnectAttempts = 0;
+      } else {
+        speedConnectAttempts++;
+        if (speedConnectAttempts > 5) {
+          Serial.println("🔄 Muitas falhas - reiniciando scan...");
+          speedConnectAttempts = 0;
+          speedDevice = nullptr;
+          startSensorScan();
+        }
+      }
+      lastSpeedConnectAttempt = millis();
     }
-    else
-    {
-      Serial.println("We have failed to connect to the server; there is nothing more we will do.");
-    }
-    doConnect = false;
   }
 
-  if (connected)
-  {
-    // Processar dados do sensor conectado (se aplicável)
-  }
-  else if (doScan)
-  {
-    BLEDevice::getScan()->start(0);
-  }
-
-  // Simular revoluções de pedalada baseado na cadência
-  if (cadenceInstantaneous != 0 && (millis()) >= (lastRevolution + (60000 / cadenceInstantaneous)))
-  {
-    revolutions++;
-    timestamp = (unsigned short)(((millis() * 1024) / 1000) % 65536);
-    lastRevolution = millis();
+  // Scan periódico se sensores faltando
+  static unsigned long lastScanTime = 0;
+  if ((!cadenceDevice || !speedDevice) && !NimBLEDevice::getScan()->isScanning() && 
+      (millis() - lastScanTime > 30000)) {
+    Serial.println("🔁 Repetindo scan para sensores faltantes...");
+    startSensorScan();
+    lastScanTime = millis();
   }
 
-  // Atualizar dados a cada segundo
-  if (millis() - lastNotify >= 1000)
-  {
-    // Atualizar dados do Fitness Machine Service
+  // Atualizar dados BLE
+  static unsigned long lastUpdate = 0;
+  if (millis() - lastUpdate >= 1000) {
     updateFitnessData();
+    updateCyclingPowerData();
     
-    // Manter compatibilidade com Cycling Power Service
-    bleBuffer[0] = 0x20; // Flags: Crank Revolution Data present
-    bleBuffer[1] = 0x00;
-    bleBuffer[2] = powerInstantaneous & 0xFF;
-    bleBuffer[3] = (powerInstantaneous >> 8) & 0xFF;
-    bleBuffer[4] = revolutions & 0xFF;
-    bleBuffer[5] = (revolutions >> 8) & 0xFF;
-    bleBuffer[6] = timestamp & 0xFF;
-    bleBuffer[7] = (timestamp >> 8) & 0xFF;
+    Serial.printf("📊 STATUS: Cadência=%dRPM | Velocidade=%.1fkm/h | Potência=%dW | Resistência=%d%%\n", 
+                  cadenceInstantaneous, speedInstantaneous / 10.0f, powerInstantaneous, resistance);
     
-    if (CyclingPowerMeasurement) {
-        CyclingPowerMeasurement->setValue(bleBuffer, 8);
-        CyclingPowerMeasurement->notify();
-    }
-    
-    lastNotify = millis();
-    
-    // Debug info
-    Serial.printf("Power: %dW | Cadence: %dRPM | Resistance: %d%% | Training: %s\n", 
-                  powerInstantaneous, cadenceInstantaneous, resistance, 
-                  trainingStarted ? "ON" : "OFF");
+    lastUpdate = millis();
   }
+
+  // Verificar timeouts
+  if (cadenceClient && (millis() - lastCadenceMillis > 15000)) {
+    Serial.println("⚠️ Sensor de cadência timeout - reconectando");
+    cadenceClient->disconnect();
+    NimBLEDevice::deleteClient(cadenceClient);
+    cadenceClient = nullptr;
+  }
+  
+  if (speedClient && (millis() - lastSpeedMillis > 15000)) {
+    Serial.println("⚠️ Sensor de velocidade timeout - reconectando");
+    speedClient->disconnect();
+    NimBLEDevice::deleteClient(speedClient);
+    speedClient = nullptr;
+  }
+
+  delay(100);
 }
