@@ -170,9 +170,19 @@ class SensorScanCallbacks : public NimBLEAdvertisedDeviceCallbacks
   }
 };
 
+// Forward declaration
+void startSensorScan();
+
 bool connectToSensor(NimBLEAdvertisedDevice *device, const char *label)
 {
   Serial.printf("🔗 Conectando ao sensor %s...\n", label);
+
+  // Garantir que o scan esteja parado antes de tentar conectar
+  if (NimBLEDevice::getScan()->isScanning())
+  {
+    NimBLEDevice::getScan()->stop();
+    delay(50);
+  }
 
   NimBLEClient *client = NimBLEDevice::createClient();
   client->setConnectTimeout(10);
@@ -181,6 +191,11 @@ bool connectToSensor(NimBLEAdvertisedDevice *device, const char *label)
   {
     Serial.printf("❌ Falha ao conectar ao sensor %s\n", label);
     NimBLEDevice::deleteClient(client);
+    // Reiniciar scan para tentar encontrar novamente
+    if (!NimBLEDevice::getScan()->isScanning())
+    {
+      startSensorScan();
+    }
     return false;
   }
 
@@ -455,17 +470,17 @@ void loop()
     lastDataUpdate = millis();
   }
 
-  // Verificar timeouts
-  if (cadenceClient && (millis() - lastCadenceMillis > 10000))
+  // Verificar desconexões inesperadas
+  if (cadenceClient && !cadenceClient->isConnected())
   {
-    cadenceClient->disconnect();
     cadenceClient = nullptr;
+    startSensorScan();
   }
 
-  if (speedClient && (millis() - lastSpeedMillis > 10000))
+  if (speedClient && !speedClient->isConnected())
   {
-    speedClient->disconnect();
     speedClient = nullptr;
+    startSensorScan();
   }
 
   delay(100);
