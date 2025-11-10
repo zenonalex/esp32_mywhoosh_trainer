@@ -54,6 +54,7 @@ void processCadenceData(uint8_t *data, size_t length)
   {
     uint16_t revs = data[1] | (data[2] << 8);
     uint16_t time = data[3] | (data[4] << 8);
+    bool cadenceEvent = false;
 
     if (lastCadenceTime != 0 && time != lastCadenceTime)
     {
@@ -71,11 +72,20 @@ void processCadenceData(uint8_t *data, size_t length)
           Serial.printf("🚴‍♂️ Cadência: %.1f RPM\n", rpm);
         }
       }
+      cadenceEvent = true;
+    }
+    else if (lastCadenceTime == 0)
+    {
+      cadenceEvent = true; // primeiro pacote recebido
     }
 
     lastCadenceRevs = revs;
     lastCadenceTime = time;
-    lastCadenceMillis = millis();
+
+    if (cadenceEvent)
+    {
+      lastCadenceMillis = millis();
+    }
   }
 }
 
@@ -89,6 +99,7 @@ void processSpeedData(uint8_t *data, size_t length)
   {
     uint32_t revs = (uint32_t)data[1] | ((uint32_t)data[2] << 8) | ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 24);
     uint16_t time = data[5] | (data[6] << 8);
+    bool speedEvent = false;
 
     if (lastWheelTime != 0)
     {
@@ -120,11 +131,20 @@ void processSpeedData(uint8_t *data, size_t length)
           Serial.printf("⚙️ Velocidade: %.2f km/h | Potência: %d W\n", speedKmh, powerInstantaneous);
         }
       }
+      speedEvent = true;
+    }
+    else if (lastWheelTime == 0)
+    {
+      speedEvent = true; // primeiro pacote recebido
     }
 
     lastWheelRevs = revs;
     lastWheelTime = time;
-    lastSpeedMillis = millis();
+
+    if (speedEvent)
+    {
+      lastSpeedMillis = millis();
+    }
   }
 }
 
@@ -441,9 +461,10 @@ void loop()
 {
   static unsigned long lastSensorManage = 0;
   static unsigned long lastDataUpdate = 0;
+  unsigned long now = millis();
 
   // Gerenciar sensores
-  if (millis() - lastSensorManage > 2000)
+  if (now - lastSensorManage > 2000)
   {
     if (cadenceDevice && !cadenceClient)
     {
@@ -458,16 +479,37 @@ void loop()
     {
       startSensorScan();
     }
-    lastSensorManage = millis();
+    lastSensorManage = now;
+  }
+
+  // Zerar métricas quando não houver dados recentes
+  if (cadenceClient && (now - lastCadenceMillis > 3000))
+  {
+    if (cadenceInstantaneous != 0)
+    {
+      cadenceInstantaneous = 0;
+      powerInstantaneous = 0;
+      Serial.println("🚴‍♂️ Cadência zerada por inatividade");
+    }
+  }
+
+  if (speedClient && (now - lastSpeedMillis > 3000))
+  {
+    if (speedInstantaneous != 0 || powerInstantaneous != 0)
+    {
+      speedInstantaneous = 0;
+      powerInstantaneous = 0;
+      Serial.println("⚙️ Velocidade e potência zeradas por inatividade");
+    }
   }
 
   // Atualizar dados BLE - ENVIAR POTÊNCIA AQUI
-  if (millis() - lastDataUpdate >= 250)
+  if (now - lastDataUpdate >= 250)
   {
     updateIndoorBikeData();   // Envia potência via Fitness Machine
     updateCyclingPowerData(); // Envia potência via Cycling Power
 
-    lastDataUpdate = millis();
+    lastDataUpdate = now;
   }
 
   // Verificar desconexões inesperadas
