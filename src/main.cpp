@@ -15,7 +15,29 @@ NimBLEAdvertisedDevice *cadenceDevice = nullptr;
 NimBLEAdvertisedDevice *speedDevice = nullptr;
 NimBLEClient *cadenceClient = nullptr;
 NimBLEClient *speedClient = nullptr;
+bool bothSensorsConnectedLogged = false;
+bool cadenceDataReceived = false;
+bool speedDataReceived = false;
+bool bothSensorsDataLogged = false;
 
+void logIfBothSensorsConnected()
+{
+  if (!bothSensorsConnectedLogged && cadenceClient && speedClient &&
+      cadenceClient->isConnected() && speedClient->isConnected())
+  {
+    bothSensorsConnectedLogged = true;
+    Serial.println("Sensores de cadência e velocidade conectados");
+  }
+}
+
+void logIfBothSensorsDataReceived()
+{
+  if (!bothSensorsDataLogged && cadenceDataReceived && speedDataReceived)
+  {
+    bothSensorsDataLogged = true;
+    Serial.println("Dados recebidos de cadência e velocidade");
+  }
+}
 uint16_t lastCadenceRevs = 0;
 uint16_t lastCadenceTime = 0;
 unsigned long lastCadenceMillis = 0;
@@ -28,9 +50,9 @@ unsigned long lastSpeedMillis = 0;
 // VARIÁVEIS PARA SERVIDOR BLE (MYWHOOSH) - TODAS COMO short
 // ============================================================================
 
-short powerInstantaneous = 200; // Potência inicial de 200W
-short cadenceInstantaneous = 80;
-short speedInstantaneous = 2000; // 20.00 km/h
+short powerInstantaneous = 0; // Potência inicial de 200W
+short cadenceInstantaneous = 0;
+short speedInstantaneous = 0; // 20.00 km/h
 short resistance = 8;           // Resistência inicial 8%
 bool trainingStarted = false;
 
@@ -69,7 +91,6 @@ void processCadenceData(uint8_t *data, size_t length)
         if (rpm >= 0 && rpm <= 200)
         {
           cadenceInstantaneous = (short)rpm;
-          Serial.printf("🚴‍♂️ Cadência: %.1f RPM\n", rpm);
         }
       }
       cadenceEvent = true;
@@ -85,6 +106,8 @@ void processCadenceData(uint8_t *data, size_t length)
     if (cadenceEvent)
     {
       lastCadenceMillis = millis();
+      cadenceDataReceived = true;
+      logIfBothSensorsDataReceived();
     }
   }
 }
@@ -127,8 +150,6 @@ void processSpeedData(uint8_t *data, size_t length)
             powerInstantaneous = 0;
           if (powerInstantaneous > 1000)
             powerInstantaneous = 1000;
-
-          Serial.printf("⚙️ Velocidade: %.2f km/h | Potência: %d W\n", speedKmh, powerInstantaneous);
         }
       }
       speedEvent = true;
@@ -144,6 +165,8 @@ void processSpeedData(uint8_t *data, size_t length)
     if (speedEvent)
     {
       lastSpeedMillis = millis();
+      speedDataReceived = true;
+      logIfBothSensorsDataReceived();
     }
   }
 }
@@ -173,19 +196,16 @@ class SensorScanCallbacks : public NimBLEAdvertisedDeviceCallbacks
     std::string name = advertisedDevice->getName();
     if (!cadenceDevice && name.find(CADENCE_SENSOR_NAME) != std::string::npos)
     {
-      Serial.printf("🚴‍♂️ Sensor de cadência encontrado: %s\n", advertisedDevice->getAddress().toString().c_str());
       cadenceDevice = new NimBLEAdvertisedDevice(*advertisedDevice);
     }
     else if (!speedDevice && name.find(SPEED_SENSOR_NAME) != std::string::npos)
     {
-      Serial.printf("⚙️ Sensor de velocidade encontrado: %s\n", advertisedDevice->getAddress().toString().c_str());
       speedDevice = new NimBLEAdvertisedDevice(*advertisedDevice);
     }
 
     if (cadenceDevice && speedDevice)
     {
       NimBLEDevice::getScan()->stop();
-      Serial.println("✅ Ambos sensores encontrados!");
     }
   }
 };
@@ -195,8 +215,6 @@ void startSensorScan();
 
 bool connectToSensor(NimBLEAdvertisedDevice *device, const char *label)
 {
-  Serial.printf("🔗 Conectando ao sensor %s...\n", label);
-
   // Garantir que o scan esteja parado antes de tentar conectar
   if (NimBLEDevice::getScan()->isScanning())
   {
@@ -209,7 +227,6 @@ bool connectToSensor(NimBLEAdvertisedDevice *device, const char *label)
 
   if (!client->connect(device))
   {
-    Serial.printf("❌ Falha ao conectar ao sensor %s\n", label);
     NimBLEDevice::deleteClient(client);
     // Reiniciar scan para tentar encontrar novamente
     if (!NimBLEDevice::getScan()->isScanning())
@@ -219,12 +236,9 @@ bool connectToSensor(NimBLEAdvertisedDevice *device, const char *label)
     return false;
   }
 
-  Serial.printf("✅ Conectado ao sensor %s!\n", label);
-
   NimBLERemoteService *service = client->getService(CSC_SERVICE_UUID);
   if (!service)
   {
-    Serial.printf("❌ Serviço não encontrado no sensor %s\n", label);
     client->disconnect();
     NimBLEDevice::deleteClient(client);
     return false;
@@ -233,7 +247,6 @@ bool connectToSensor(NimBLEAdvertisedDevice *device, const char *label)
   NimBLERemoteCharacteristic *characteristic = service->getCharacteristic(CSC_CHARACTERISTIC_UUID);
   if (!characteristic)
   {
-    Serial.printf("❌ Característica não encontrada no sensor %s\n", label);
     client->disconnect();
     NimBLEDevice::deleteClient(client);
     return false;
@@ -242,24 +255,27 @@ bool connectToSensor(NimBLEAdvertisedDevice *device, const char *label)
   if (characteristic->canNotify())
   {
     characteristic->subscribe(true, handleSensorNotification);
-    Serial.printf("📡 Notificações ativadas para %s\n", label);
   }
 
   if (strcmp(label, "cadência") == 0)
   {
     cadenceClient = client;
+    cadenceDataReceived = false;
   }
   else
   {
     speedClient = client;
+    speedDataReceived = false;
   }
+
+  bothSensorsDataLogged = false;
+  logIfBothSensorsConnected();
 
   return true;
 }
 
 void startSensorScan()
 {
-  Serial.println("🔍 Procurando sensores...");
   NimBLEScan *scan = NimBLEDevice::getScan();
   scan->clearResults();
   scan->setAdvertisedDeviceCallbacks(new SensorScanCallbacks(), false);
@@ -327,8 +343,17 @@ class ControlPointCallbacks : public NimBLECharacteristicCallbacks
         break;
 
       case 0x07: // Simulation Parameters
+      {
+        float gradePercent = 0.0f;
+        if (value.length() >= 3)
+        {
+          int16_t gradeRaw = (int16_t)((value[2] << 8) | value[1]);
+          gradePercent = gradeRaw / 100.0f;
+        }
+        Serial.printf("Dados de elevação recebidos (inclinação: %.2f%%)\n", gradePercent);
         sendControlResponse(0x07, 0x01);
         break;
+      }
 
       default:
         sendControlResponse(opCode, 0x80);
@@ -368,8 +393,6 @@ void updateIndoorBikeData()
   IndoorBikeData->setValue(data, 8);
   IndoorBikeData->notify();
 
-  Serial.printf("🔍 TESTE INVERTIDO - Resistência: %d%% | Cadência: %dRPM | Potência: %dW\n",
-                resistance, cadenceInstantaneous, powerInstantaneous);
 }
 
 void updateCyclingPowerData()
@@ -388,13 +411,12 @@ void updateCyclingPowerData()
   CyclingPowerMeasurement->setValue(data, 4);
   CyclingPowerMeasurement->notify();
 
-  Serial.printf("⚡ CyclingPower - Potência: %dW\n", powerInstantaneous);
 }
 
 void setupServer()
 {
   Serial.println("🚀 Iniciando servidor BLE...");
-  NimBLEDevice::init("QZ-POWER-TRAINER");
+  NimBLEDevice::init("ZENON-TRAINER");
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
 
   pServer = NimBLEDevice::createServer();
@@ -440,7 +462,6 @@ void setupServer()
   pAdvertising->setScanResponse(true);
   pAdvertising->start();
 
-  Serial.println("✅ Servidor BLE pronto! Potência: 200W inicial");
 }
 
 // ============================================================================
@@ -489,7 +510,6 @@ void loop()
     {
       cadenceInstantaneous = 0;
       powerInstantaneous = 0;
-      Serial.println("🚴‍♂️ Cadência zerada por inatividade");
     }
   }
 
@@ -499,7 +519,6 @@ void loop()
     {
       speedInstantaneous = 0;
       powerInstantaneous = 0;
-      Serial.println("⚙️ Velocidade e potência zeradas por inatividade");
     }
   }
 
@@ -516,12 +535,18 @@ void loop()
   if (cadenceClient && !cadenceClient->isConnected())
   {
     cadenceClient = nullptr;
+    bothSensorsConnectedLogged = false;
+    cadenceDataReceived = false;
+    bothSensorsDataLogged = false;
     startSensorScan();
   }
 
   if (speedClient && !speedClient->isConnected())
   {
     speedClient = nullptr;
+    bothSensorsConnectedLogged = false;
+    speedDataReceived = false;
+    bothSensorsDataLogged = false;
     startSensorScan();
   }
 
